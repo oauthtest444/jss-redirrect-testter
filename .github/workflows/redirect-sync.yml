@@ -1,1 +1,96 @@
+name: Redirect Sync
 
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  redirect-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.MY_PAT_TOKEN }}
+
+      - name: Setup Node.js with Cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: '**/package.json'
+
+      - name: Cache Puppeteer Browser
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/puppeteer
+            node_modules
+          key: puppeteer-${{ runner.os }}-node20-${{ hashFiles('**/package.json') }}
+          restore-keys: |
+            puppeteer-${{ runner.os }}-node20-
+
+      - name: Setup Tools
+        run: |
+          chmod +x tools/dedup.sh
+          chmod +x tools/js-redirect-tester.js
+
+      - name: Install Dependencies
+        run: |
+          npm install puppeteer --silent
+
+      - name: Process Task
+        run: |
+          if [ ! -s data/list.txt ]; then
+            echo "No targets in list.txt"
+            exit 0
+          fi
+
+          # Extract one target
+          RAW=$(head -n 1 data/list.txt)
+          TARGET=$(echo "$RAW" | tr -d '\r' | xargs)
+          sed -i '1d' data/list.txt
+
+          if [ -z "$TARGET" ]; then
+            exit 0
+          fi
+
+          echo "Processing target: $TARGET"
+
+          # === Fetch Wayback URLs ===
+          wget -qO urls.txt "https://web.archive.org/cdx/search/cdx?url=${TARGET}&matchType=domain&fl=original&collapse=urlkey&output=text&filter=statuscode:200" || true
+
+          # === Filter Parameterized URLs ===
+          fgrep '?' urls.txt | egrep -i -v '\.(js|gif|jpg|jpeg|png|css|html|htm|gz|svg|ico|webp|avif|bmp|txt|pdf|xml|json|map|mp4|webm|ogv|mov|mp3|wav|ogg|flac|aac|m4a|woff|woff2|ttf|otf|eot|zip|rar|7z|tar)(\?|$)' > q-urls.txt || true
+
+          # === Deduplication ===
+          if [ -s q-urls.txt ]; then
+            ./tools/dedup.sh -f q-urls.txt -o final-urls.txt || true
+          else
+            echo "No parameterized URLs found"
+            git config --global user.name "system"
+            git config --global user.email "system@noreply.github.com"
+            git add data/list.txt
+            git commit -m "chore: update cache" -q || true
+            git push origin main -q || true
+            exit 0
+          fi
+
+          # === Run JS Redirect Tester ===
+          if [ -s final-urls.txt ]; then
+            echo "Running JS Redirect Tester on $(wc -l < final-urls.txt) URLs"
+            node tools/js-redirect-tester.js -l final-urls.txt -o results-redirect.txt
+          fi
+
+          # === Commit updated list ===
+          git config --global user.name "system"
+          git config --global user.email "system@noreply.github.com"
+          git add data/list.txt
+
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: redirect sync update" -q
+            git push origin main -q
+          fi
