@@ -1,4 +1,3 @@
-mongodb.com
 adobe.com
 acronis.com
 acronis.work
