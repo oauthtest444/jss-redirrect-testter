@@ -38,9 +38,14 @@ jobs:
           chmod +x tools/dedup.sh
           chmod +x tools/js-redirect-tester.js
 
-      - name: Install Dependencies
-        run: |
-          npm install puppeteer --verbose
+           - name: Create package.json
+              run: |
+              rm -f package.json
+              npm init -y
+
+            - name: Install Dependencies
+               run: |
+               npm install puppeteer
 
       - name: Process Task
         run: |
