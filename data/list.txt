@@ -1,4 +1,3 @@
-advisorsolutions.gs
 exodus.io
 airbnb-aws.com
 airbnbcitizen.com
