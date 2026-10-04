@@ -1,5 +1,5 @@
 {
-  "domain": "",
-  "stage": "idle",
+  "domain": "evil.com",
+  "stage": "route-recon",
   "domain_index": 0
 }
