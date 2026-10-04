@@ -1,5 +1,5 @@
 {
-  "domain": "cb.dev",
-  "stage": "redirect",
+  "domain": "evil.com",
+  "stage": "route-recon",
   "domain_index": 0
 }
