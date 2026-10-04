@@ -1,1 +1,1 @@
-directory-v3-live.cb.dev
+cb.dev
