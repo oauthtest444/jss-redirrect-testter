@@ -334,8 +334,11 @@ jobs:
             # Stage: complete-domain — finalize, remove from list, advance
             # ----------------------------------------------------------
             if [[ "$CURRENT_STAGE" == "complete-domain" ]]; then
+              # Keep only files that have actual content; remove blank/empty ones.
               for f in all-uniq-routs.txt all-uniq-params.txt js_redirect_vulnerable.txt; do
-                [[ -e "$DOMAIN_DIR/$f" ]] || : > "$DOMAIN_DIR/$f"
+                if [[ -e "$DOMAIN_DIR/$f" ]] && [[ ! -s "$DOMAIN_DIR/$f" ]]; then
+                  rm -f "$DOMAIN_DIR/$f"
+                fi
               done
               rm -rf "$WORK"
 
