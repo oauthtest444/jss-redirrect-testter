@@ -1,0 +1,4 @@
+http://bbbbbbb.com:80/
+http://www.bbbbbbb.com:80/common/advertise/advertising.htm
+http://bbbbbbb.com:80/common/roar/results.htm
+http://bbbbbbb.com:80/earch/tsc.php
