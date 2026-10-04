@@ -10,24 +10,24 @@ From a Wayback/archive URL list:
   2) Keep FULL URLs from ALL hosts / subdomains (no single-host filter)
   3) Pattern-dedupe dynamic segments (UUID / hex / number / id) per host
   4) HTTP GET: keep only HTTP 200 + HTML
-  5) Fingerprint by total inline <script> content length
-     regex: <script\b[^>]*>(.*?)</script\s*>
-     Keep only ONE URL per unique script-content length
+  5) Fingerprint by total inline script content length PER SUBDOMAIN
+     Keep only ONE URL per unique script-content length PER HOST
+     (different subdomains never collapse into each other)
   6) Write final unique URLs
 
 Important:
-  - ALL subdomains are kept (e.g. directory-v3-live.cb.dev is NOT dropped)
-  - Only obvious static assets (.js/.css/.png/...) are excluded before probing
-  - API-path filter is OFF by default (use --strict-ui to enable)
+  - ALL subdomains are kept (no seed-host filter)
+  - Script-length dedupe is per-host so every sub appears in output
+  - Only obvious static assets are excluded before probing
 
 Dependencies:
     (stdlib only)
 
 Examples:
-    python route_params_recon.py -f list.txt
-    python route_params_recon.py -f list.txt -uo all-uniq-routs.txt -t 25 --timeout 8
-    python route_params_recon.py -f list.txt --no-validate
-    python route_params_recon.py -f list.txt --strict-ui
+    python archive_uniq_params_routes_v2.py -f list.txt
+    python archive_uniq_params_routes_v2.py -f list.txt -uo all-uniq-routs.txt -t 25 --timeout 8
+    python archive_uniq_params_routes_v2.py -f list.txt --no-validate
+    python archive_uniq_params_routes_v2.py -f list.txt --no-script-dedupe
 """
 
 from __future__ import annotations
@@ -47,7 +47,6 @@ from urllib.parse import parse_qsl, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 
-# Only skip clear static / binary assets. Everything else is probed.
 NON_UI_EXTENSIONS = {
     ".js", ".mjs", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif", ".webp",
     ".svg", ".ico", ".bmp", ".tif", ".tiff", ".avif", ".woff", ".woff2",
@@ -57,7 +56,6 @@ NON_UI_EXTENSIONS = {
     ".bin", ".exe", ".dmg", ".apk",
 }
 
-# Relaxed UUID: any 8-4-4-4-12 hex (incl. nil / non-RFC version)
 DYNAMIC_SEGMENT_PATTERNS = [
     ("uuid", re.compile(
         r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
@@ -88,8 +86,8 @@ _SSL_CTX.verify_mode = ssl.CERT_NONE
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Archive URLs (ALL subs) → pattern-dedupe → 200+HTML → "
-            "unique by inline-script content length"
+            "Archive URLs (ALL subs) -> pattern-dedupe -> 200+HTML -> "
+            "unique by inline-script length PER subdomain"
         ),
         add_help=False,
     )
@@ -123,10 +121,14 @@ def parse_args() -> argparse.Namespace:
         help="Disable UUID/number/hex path collapse (default: ON)",
     )
     p.add_argument(
+        "--no-script-dedupe", action="store_true",
+        help="Disable inline-script-length dedupe; keep all 200+HTML URLs",
+    )
+    p.add_argument(
         "--strict-ui", action="store_true",
         help=(
             "Also drop paths whose first segment is api/graphql/rest/rpc/webhook. "
-            "Default OFF so subdomains like directory-v3-live.cb.dev are not missed."
+            "Default OFF so all subdomains are kept."
         ),
     )
     p.add_argument(
@@ -159,28 +161,18 @@ def is_static_asset(path: str) -> bool:
 
 
 def looks_like_candidate(url: str, strict_ui: bool) -> bool:
-    """
-    Keep almost everything that is http(s) and not a clear static asset.
-    Optional strict_ui also drops api/graphql/... first segments.
-    """
     p = urlparse(url)
     if p.scheme not in {"http", "https"}:
         return False
     if is_static_asset(p.path or "/"):
         return False
-
     if strict_ui:
         path = p.path or "/"
         first = path.strip("/").split("/", 1)[0].lower() if path.strip("/") else ""
         if first in {"api", "apis", "graphql", "rest", "rpc", "webhook", "webhooks"}:
             return False
-
     return True
 
-
-# ---------------------------------------------------------------------------
-# Parameter pipeline
-# ---------------------------------------------------------------------------
 
 def normalize_parameter_for_dedup(name: str) -> str:
     n = name.strip()
@@ -269,10 +261,6 @@ def extract_query_parameters(urls: Iterable[str]) -> List[str]:
     return dedupe_parameters(params)
 
 
-# ---------------------------------------------------------------------------
-# Full-URL helpers
-# ---------------------------------------------------------------------------
-
 def classify_dynamic_segment(segment: str) -> Optional[str]:
     for kind, rx in DYNAMIC_SEGMENT_PATTERNS:
         if rx.fullmatch(segment):
@@ -322,20 +310,12 @@ def normalize_full_url(url: str) -> str:
     return urlunparse((scheme, netloc, path, "", "", ""))
 
 
-# ---------------------------------------------------------------------------
-# Inline-script fingerprint
-# ---------------------------------------------------------------------------
-
 def inline_script_content_length(html_text: str) -> int:
     total = 0
     for m in INLINE_SCRIPT_RE.finditer(html_text):
         total += len(m.group(1))
     return total
 
-
-# ---------------------------------------------------------------------------
-# HTTP probe
-# ---------------------------------------------------------------------------
 
 def is_html_content_type(headers) -> bool:
     ct = headers.get("Content-Type") or headers.get("content-type") or ""
@@ -349,10 +329,6 @@ def is_html_content_type(headers) -> bool:
 def probe_url(
     url: str, timeout: float, max_body: int
 ) -> Tuple[str, bool, int, str]:
-    """
-    GET the URL.
-    Returns (url, is_valid_200_html, script_content_length, reason).
-    """
     headers = {
         "User-Agent": DEFAULT_UA,
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
@@ -399,10 +375,6 @@ def probe_url(
         return url, False, -1, f"err={type(e).__name__}"
 
 
-# ---------------------------------------------------------------------------
-# Files / logging
-# ---------------------------------------------------------------------------
-
 def write_lines(path: Path, lines: Iterable[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     unique: List[str] = []
@@ -442,17 +414,11 @@ def main() -> int:
 
     print(f"[+] Seed lines: {len(archive_urls)}")
 
-    # ================================================================
-    # PARAMETER PIPELINE
-    # ================================================================
     unique_params = extract_query_parameters(archive_urls)
     write_lines(Path(args.param_output), unique_params)
     print_stage("Unique query parameters", len(unique_params))
     print(f"[+] Parameter output: {args.param_output}")
 
-    # ================================================================
-    # FULL-URL PIPELINE – ALL hosts / subdomains (no single-host filter)
-    # ================================================================
     raw_host_counter: Counter = Counter()
     candidates: List[str] = []
     exact_seen: Set[str] = set()
@@ -482,19 +448,16 @@ def main() -> int:
         except Exception:
             continue
 
-    # Always show every host present in the input so nothing is "invisible"
     print_hosts("Hosts present in input (before filters)", raw_host_counter)
     print_stage("Exact-unique candidate full URLs", len(candidates))
     print_hosts("Hosts after static-asset filter", host_counter)
 
-    # Warn if a known-looking sub vanished
     missing = set(raw_host_counter) - set(host_counter)
     if missing:
         print(f"[!] Hosts fully dropped by static-asset filter ({len(missing)}):")
         for h in sorted(missing):
-            print(f"    {h}  (had {raw_host_counter[h]} urls — all looked like static assets)")
+            print(f"    {h}  (had {raw_host_counter[h]} urls)")
 
-    # Pattern-dedupe ON by default
     to_probe: List[str] = candidates
     if not args.no_pattern_dedupe:
         pattern_seen: Set[Tuple[str, str]] = set()
@@ -531,9 +494,6 @@ def main() -> int:
         print("[+] Done.")
         return 0
 
-    # ================================================================
-    # HTTP GET → 200 + HTML → fingerprint by inline-script length
-    # ================================================================
     print(
         f"[+] Probing {len(to_probe)} URLs "
         f"(threads={args.threads}, timeout={args.timeout}s, "
@@ -585,7 +545,6 @@ def main() -> int:
     valid_hosts = Counter(host_key(u) for u, _ in valid_hits)
     print_hosts("Hosts with 200+HTML", valid_hosts)
 
-    # Hosts that were probed but got zero valid HTML
     probed_hosts = Counter(host_key(u) for u in to_probe)
     zero_html = sorted(set(probed_hosts) - set(valid_hosts))
     if zero_html:
@@ -593,24 +552,38 @@ def main() -> int:
         for h in zero_html:
             print(f"    {h}  (probed {probed_hosts[h]} urls)")
 
-    # ---------------------------------------------------------------
-    # Dedupe by inline-script content length
-    # ---------------------------------------------------------------
-    length_seen: Set[int] = set()
-    final_urls: List[str] = []
+    # Script-length dedupe PER SUBDOMAIN
+    if args.no_script_dedupe:
+        final_urls = [u for u, _ in valid_hits]
+        print_stage("Keeping all 200+HTML (script-dedupe OFF)", len(final_urls))
+    else:
+        length_seen_per_host: Dict[str, Set[int]] = defaultdict(set)
+        final_urls = []
+        collapsed = 0
 
-    for url, script_len in valid_hits:
-        if script_len in length_seen:
-            continue
-        length_seen.add(script_len)
-        final_urls.append(url)
+        for url, script_len in valid_hits:
+            h = host_key(url)
+            if script_len in length_seen_per_host[h]:
+                collapsed += 1
+                continue
+            length_seen_per_host[h].add(script_len)
+            final_urls.append(url)
 
-    print_stage("Unique by inline-script content length", len(final_urls))
-    if len(valid_hits) != len(final_urls):
-        print(
-            f"[i] Collapsed {len(valid_hits) - len(final_urls)} pages "
-            f"sharing the same script-content length"
+        print_stage(
+            "Unique by inline-script length (per subdomain)",
+            len(final_urls),
         )
+        if collapsed:
+            print(
+                f"[i] Collapsed {collapsed} pages sharing the same "
+                f"script-content length within their own subdomain"
+            )
+            print("[i] Use --no-script-dedupe to keep all 200+HTML URLs instead.")
+
+        if length_seen_per_host:
+            print("[+] Script-length buckets per host:")
+            for h in sorted(length_seen_per_host.keys()):
+                print(f"    {h}: {len(length_seen_per_host[h])} unique length(s)")
 
     write_lines(Path(args.url_output), final_urls)
     print(f"[+] URL output: {args.url_output}")
@@ -624,11 +597,12 @@ def main() -> int:
     print(f"[+] Parameters : {args.param_output}")
     print(f"[+] URLs       : {args.url_output}")
     print()
-    print("[i] ALL subdomains from the input are considered (no seed-host filter).")
-    print("[i] Static assets only are dropped before probe; API-path filter is OFF.")
-    print("[i] Pipeline: pattern-dedupe → 200+HTML → unique script-content length")
-    print("[i] If a host is missing, check the 'Hosts present in input' and")
-    print("    'Hosts probed but no 200+HTML' sections above.")
+    print("[i] ALL subdomains from the input are considered.")
+    print("[i] Script-length dedupe is PER subdomain (hosts never merge).")
+    print("[i] Pipeline: pattern-dedupe -> 200+HTML -> unique script-len per host")
+    print("[i] --no-script-dedupe  keep every 200+HTML URL")
+    print("[i] --no-validate       skip live checks")
+    print("[i] --no-pattern-dedupe keep every concrete path")
 
     return 0
 
