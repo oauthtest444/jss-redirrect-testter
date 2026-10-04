@@ -273,8 +273,9 @@ jobs:
 
             # If we resumed into route-recon but the temp file is gone
             # (ephemeral runner /tmp), re-fetch archive first.
+            # Empty file is valid (domain had 0 query URLs) — only re-fetch when missing.
             if [[ "$CURRENT_STAGE" == "route-recon" ]]; then
-              if [[ ! -s "$WORK/q-urls.txt" ]]; then
+              if [[ ! -e "$WORK/q-urls.txt" ]]; then
                 echo "[!] [$DOMAIN] q-urls.txt missing — re-running archive fetch"
                 CURRENT_STAGE="archive"
                 continue
