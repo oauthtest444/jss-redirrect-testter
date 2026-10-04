@@ -1,5 +1,5 @@
 {
   "domain": "directory-v3-live.cb.dev",
-  "stage": "route-recon",
+  "stage": "redirect",
   "domain_index": 0
 }
