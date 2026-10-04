@@ -1,146 +1,730 @@
-const puppeteer = require('puppeteer');
-const fs = require('fs');
-const {
-	execSync
-} = require('child_process');
+#!/usr/bin/env python3
 
-const PAYLOAD = "https://evil.com";
-let OUTPUT_FILE = "js_redirect_vulnerable.txt";
-const WEBHOOK = "https://discord.com/api/webhooks/1508123239732350987/Q-oc7dcydk07KJwnsAJSbTpaVeNxHR6HnVkkpf5Q8kkJqMfQYpbu9ZGEaHx80IKm1oZw";
-const WAIT_TIME = 7000;
+import argparse
+import os
+import sys
+import time
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-async function sendToDiscord(url, param) {
-	const content = `**🔴 JS REDIRECT VULNERABLE!**\n**URL:** ${url}\n**Parameter:** ${param}\n**Payload:** ${PAYLOAD}`;
-	try {
-		await fetch(WEBHOOK, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json'
-			},
-			body: JSON.stringify({
-				content
-			})
-		});
-		console.log("     ✅ Webhook Sent!");
-	} catch (e) {
-		console.log("     ❌ Webhook failed");
-	}
-}
+import requests
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-async function testUrl(baseUrl) {
-	console.log(`\n[+] Testing: ${baseUrl}`);
 
-	if (!baseUrl.includes('?')) {
-		console.log("   No parameters found.");
-		return;
-	}
+PAYLOAD = "https://evil.com/"
 
-	const browser = await puppeteer.launch({
-		headless: true,
-		args: ['--no-sandbox', '--disable-setuid-sandbox']
-	});
+# Wait up to 5 seconds for delayed JavaScript redirects.
+DEFAULT_WAIT = 5.0
 
-	const page = await browser.newPage();
-	await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+# Check the browser URL every 0.5 seconds.
+POLL_INTERVAL = 0.5
 
-	try {
-		const urlObj = new URL(baseUrl);
-		const params = new URLSearchParams(urlObj.search);
-		const paramKeys = Array.from(params.keys());
+DEFAULT_TIMEOUT = 15000
 
-		for (const key of paramKeys) {
-			console.log(`   → Testing parameter: ${key}`);
+# How many parameter names to inject into a single request.
+PARAMS_PER_GROUP = 100
 
-			const testUrl = new URL(baseUrl);
-			testUrl.searchParams.set(key, PAYLOAD);
 
-			console.log(`     Navigating...`);
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/128.0.0.0 Safari/537.36"
+)
 
-			await page.goto(testUrl.toString(), {
-				waitUntil: 'networkidle2',
-				timeout: 15000
-			});
+# Max characters shown for URLs in console output.
+DISPLAY_URL_MAX = 100
 
-			await new Promise(resolve => setTimeout(resolve, WAIT_TIME));
 
-			const currentUrl = page.url();
+def truncate_url(url, max_len=DISPLAY_URL_MAX):
+    """
+    Shorten long URLs for console display.
 
-			let vulnerable = false;
+    Keeps the beginning of the URL and appends '...' at the end.
+    Example:
+        https://apps.powerapps.com/apps?vID=https%3A%2F%2Fevil.com%2F&...
+    """
+    if not url or len(url) <= max_len:
+        return url
+    return url[:max_len] + "..."
 
-			try {
-				const originalHost = new URL(baseUrl).hostname;
-				const finalHost = new URL(currentUrl).hostname;
 
-				if (
-					finalHost === "evil.com" &&
-					finalHost !== originalHost
-				) {
-					vulnerable = true;
-				}
-			} catch (e) {
-				vulnerable = false;
-			}
+def load_urls(path):
+    """
+    Load target URLs.
 
-			if (vulnerable) {
-				console.log(`     ✅ JS REDIRECT VULNERABLE!`);
-				console.log(`     Final URL: ${currentUrl}`);
+    The URL is kept exactly as supplied.
+    """
 
-				const result =
-					`URL: ${testUrl}
-✅ JS REDIRECT VULNERABLE!
-Final URL: ${currentUrl}
-Parameter: ${key}
-Payload: ${PAYLOAD}
----
-`;
+    urls = []
 
-				fs.appendFileSync(OUTPUT_FILE, result);
-				await sendToDiscord(testUrl.toString(), key);
+    with open(
+        path,
+        "r",
+        encoding="utf-8",
+        errors="ignore",
+    ) as f:
 
-			} else {
-				console.log(`     Not redirected to evil.com (Current: ${currentUrl})`);
-			}
-		}
-	} catch (err) {
-		console.log(`   Error testing ${baseUrl}: ${err.message}`);
-	} finally {
-		await browser.close();
-	}
-}
+        for line in f:
 
-// ====================== MAIN LOGIC ======================
-(async () => {
-	const args = process.argv.slice(2);
+            url = line.strip()
 
-	// Handle -o flag
-	const oIndex = args.indexOf('-o');
-	if (oIndex !== -1 && args[oIndex + 1]) {
-		OUTPUT_FILE = args[oIndex + 1];
-	}
+            if not url:
+                continue
 
-	if (args.includes('-u') && args[args.indexOf('-u') + 1]) {
-		const url = args[args.indexOf('-u') + 1];
-		await testUrl(url);
-	} else if (args.includes('-l') && args[args.indexOf('-l') + 1]) {
-		const listFile = args[args.indexOf('-l') + 1];
+            if url.startswith("http://") or url.startswith("https://"):
+                urls.append(url)
 
-		if (!fs.existsSync(listFile)) {
-			console.log(`Error: File ${listFile} not found!`);
-			process.exit(1);
-		}
+    return urls
 
-		const urls = fs.readFileSync(listFile, 'utf-8').split('\n')
-			.map(line => line.trim())
-			.filter(line => line !== '');
 
-		for (const url of urls) {
-			await testUrl(url);
-		}
-	} else {
-		console.log("Usage:");
-		console.log("  node js-redirect-tester.js -u <URL> [-o output.txt]");
-		console.log("  node js-redirect-tester.js -l <urls.txt> [-o output.txt]");
-	}
+def load_parameter_groups(path):
+    """
+    Collect ALL parameter names from the file, then split them
+    into batches of PARAMS_PER_GROUP (default 100).
 
-	console.log(`\n[+] Testing completed! Results saved to: ${OUTPUT_FILE}`);
-})();
+    Supported line formats (mixed OK):
+
+        p1
+        p2
+        p3
+
+        ?a=testtt&b=testtt&c=testtt
+        ?x=testtt&y=testtt
+
+        a=foo&b=bar
+
+    Every name is extracted, duplicates are removed (order kept),
+    then the full list is chunked into groups of 100.
+
+    Each group becomes ONE request where every name is set to:
+
+        https://evil.com/
+
+    IMPORTANT:
+    Parameters are ONLY read from this file.
+    Nothing is extracted from JSON, POST bodies, HTML,
+    JavaScript, or target responses.
+    """
+
+    all_names = []
+    seen = set()
+
+    with open(
+        path,
+        "r",
+        encoding="utf-8",
+        errors="ignore",
+    ) as f:
+
+        for line in f:
+
+            line = line.strip()
+
+            if not line:
+                continue
+
+            if line.startswith("?"):
+                line = line[1:]
+
+            # Plain name (no '=' and no '&') → single parameter.
+            if "=" not in line and "&" not in line:
+                name = line.strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    all_names.append(name)
+                continue
+
+            try:
+                params = parse_qsl(
+                    line,
+                    keep_blank_values=True,
+                )
+            except Exception:
+                continue
+
+            for name, _ in params:
+                name = name.strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    all_names.append(name)
+
+    # Chunk into groups of PARAMS_PER_GROUP.
+    groups = []
+    for i in range(0, len(all_names), PARAMS_PER_GROUP):
+        chunk = all_names[i : i + PARAMS_PER_GROUP]
+        if chunk:
+            groups.append(chunk)
+
+    return groups
+
+
+def build_test_url(base_url, parameter_names):
+    """
+    Replace/add ONLY query-string parameters.
+
+    The target path is NEVER changed.
+
+    Example:
+
+        https://example.com/test
+
+    with:
+
+        ["next", "url"]
+
+    becomes:
+
+        https://example.com/test?next=https%3A%2F%2Fevil.com%2F&url=https%3A%2F%2Fevil.com%2F
+
+    NOT:
+
+        https://example.com/test/https:/evil.com/
+    """
+
+    parts = urlsplit(base_url)
+
+    # Existing query parameters from the target URL.
+    existing = parse_qsl(
+        parts.query,
+        keep_blank_values=True,
+    )
+
+    tested_names = set(parameter_names)
+
+    # Preserve existing parameters that aren't being tested.
+    preserved = [
+        (name, value)
+        for name, value in existing
+        if name not in tested_names
+    ]
+
+    # Replace each parameter from the current fuzz group.
+    fuzzed = [
+        (name, PAYLOAD)
+        for name in parameter_names
+    ]
+
+    new_query = urlencode(
+        preserved + fuzzed,
+        doseq=True,
+    )
+
+    # IMPORTANT:
+    # scheme
+    # hostname
+    # path
+    # fragment
+    #
+    # are preserved.
+    return urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            parts.path,
+            new_query,
+            parts.fragment,
+        )
+    )
+
+
+def is_evil_redirect(original_url, current_url):
+    """
+    Return True only when the browser reaches evil.com.
+
+    Example confirmed:
+
+        https://evil.com/
+
+        https://evil.com/test
+
+        https://evil.com/?x=1
+
+    NOT confirmed:
+
+        https://chaturbate.com/v2apps/apps/https:/evil.com/
+    """
+
+    try:
+
+        original = urlsplit(original_url)
+        current = urlsplit(current_url)
+
+        if current.scheme.lower() != "https":
+            return False
+
+        if not current.hostname:
+            return False
+
+        current_host = current.hostname.lower()
+
+        if current_host != "evil.com":
+            return False
+
+        original_host = (
+            original.hostname.lower()
+            if original.hostname
+            else ""
+        )
+
+        # Must actually leave the original host.
+        if current_host == original_host:
+            return False
+
+        return True
+
+    except Exception:
+        return False
+
+
+def wait_for_redirect(
+    page,
+    original_url,
+    wait_seconds,
+):
+    """
+    Wait for delayed client-side redirects.
+
+    Checks every POLL_INTERVAL seconds.
+
+    This handles redirects that happen several seconds
+    after the initial page load.
+    """
+
+    start = time.monotonic()
+
+    while True:
+
+        current_url = page.url
+
+        if is_evil_redirect(
+            original_url,
+            current_url,
+        ):
+            return current_url
+
+        elapsed = time.monotonic() - start
+
+        if elapsed >= wait_seconds:
+            return current_url
+
+        page.wait_for_timeout(
+            int(POLL_INTERVAL * 1000)
+        )
+
+
+def send_discord(
+    webhook,
+    original_url,
+    test_url,
+    final_url,
+    parameters,
+):
+    """
+    Send confirmed finding to Discord.
+    """
+
+    if not webhook:
+
+        print(
+            "       ⚠️ "
+            "DISCORD_WEBHOOK_URL is not configured."
+        )
+
+        return
+
+    message = {
+        "content": "🔴 **JS Redirect Vulnerability Confirmed**",
+        "embeds": [
+            {
+                "title": "Client-Side JS Redirect Confirmed",
+                "description": (
+                    f"**Original URL:**\n"
+                    f"{original_url}\n\n"
+                    f"**Test URL:**\n"
+                    f"{test_url}\n\n"
+                    f"**Final URL:**\n"
+                    f"{final_url}\n\n"
+                    f"**Parameters:**\n"
+                    f"{', '.join(parameters)}\n\n"
+                    f"**Payload:**\n"
+                    f"{PAYLOAD}"
+                ),
+            }
+        ],
+    }
+
+    try:
+
+        response = requests.post(
+            webhook,
+            json=message,
+            timeout=10,
+        )
+
+        response.raise_for_status()
+
+        print(
+            "       📣 Discord notification sent."
+        )
+
+    except Exception as exc:
+
+        print(
+            "       ⚠️ Discord notification failed: "
+            f"{exc}"
+        )
+
+
+def main():
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Test query parameter groups for "
+            "delayed client-side JavaScript redirects."
+        )
+    )
+
+    parser.add_argument(
+        "-l",
+        "--list",
+        required=True,
+        help="Target URL list",
+    )
+
+    parser.add_argument(
+        "-p",
+        "--params",
+        required=True,
+        help=(
+            "Parameter names file. "
+            "All names are collected and tested "
+            f"in batches of {PARAMS_PER_GROUP}."
+        ),
+    )
+
+    parser.add_argument(
+        "-o",
+        "--output",
+        default="js_redirect_vulnerable.txt",
+        help="Output findings file",
+    )
+
+    parser.add_argument(
+        "--wait",
+        type=float,
+        default=DEFAULT_WAIT,
+        help=(
+            "Seconds to wait for delayed redirect. "
+            "Default: 10"
+        ),
+    )
+
+    parser.add_argument(
+        "-t",
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT,
+        help=(
+            "Initial page navigation timeout "
+            "in milliseconds."
+        ),
+    )
+
+    args = parser.parse_args()
+
+    if args.wait < 0:
+
+        print(
+            "[-] --wait cannot be negative."
+        )
+
+        return 1
+
+    if not os.path.isfile(args.list):
+
+        print(
+            f"[-] URL list not found: "
+            f"{args.list}"
+        )
+
+        return 1
+
+    if not os.path.isfile(args.params):
+
+        print(
+            f"[-] Parameter file not found: "
+            f"{args.params}"
+        )
+
+        return 1
+
+    urls = load_urls(
+        args.list
+    )
+
+    parameter_groups = load_parameter_groups(
+        args.params
+    )
+
+    if not urls:
+
+        print(
+            "[-] No HTTP/HTTPS URLs found."
+        )
+
+        return 0
+
+    if not parameter_groups:
+
+        print(
+            "[-] No parameter groups found."
+        )
+
+        return 1
+
+    webhook = os.environ.get(
+        "DISCORD_WEBHOOK_URL",
+        "",
+    ).strip()
+
+    print()
+    print(
+        "[+] JS Redirect Tester"
+    )
+
+    print(
+        f"[+] URLs            : "
+        f"{len(urls)}"
+    )
+
+    print(
+        f"[+] Parameter groups: "
+        f"{len(parameter_groups)} "
+        f"(batched by {PARAMS_PER_GROUP})"
+    )
+
+    print(
+        f"[+] Payload         : "
+        f"{PAYLOAD}"
+    )
+
+    print(
+        f"[+] Redirect wait   : "
+        f"{args.wait}s"
+    )
+
+    print()
+
+    findings = []
+    seen = set()
+
+    with sync_playwright() as playwright:
+
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+            ],
+        )
+
+        context = browser.new_context(
+            user_agent=USER_AGENT,
+        )
+
+        page = context.new_page()
+
+        try:
+
+            for url_index, base_url in enumerate(
+                urls,
+                1,
+            ):
+
+                print(
+                    f"[{url_index}/{len(urls)}] "
+                    f"{base_url}"
+                )
+
+                for group_index, parameter_group in enumerate(
+                    parameter_groups,
+                    1,
+                ):
+
+                    print(
+                        f"    → Group "
+                        f"{group_index}/"
+                        f"{len(parameter_groups)} "
+                        f"({len(parameter_group)} parameters)"
+                    )
+
+                    # Build request using ONLY this group's
+                    # parameters (up to 100 names).
+                    test_url = build_test_url(
+                        base_url,
+                        parameter_group,
+                    )
+
+                    print(
+                        f"       Request: "
+                        f"{truncate_url(test_url)}"
+                    )
+
+                    try:
+
+                        page.goto(
+                            test_url,
+                            wait_until="domcontentloaded",
+                            timeout=args.timeout,
+                        )
+
+                    except PlaywrightTimeoutError:
+
+                        print(
+                            "       ⚠️ Initial navigation "
+                            "timed out; continuing to monitor "
+                            "the browser URL."
+                        )
+
+                    except Exception as exc:
+
+                        print(
+                            f"       ⚠️ Navigation error: "
+                            f"{exc}"
+                        )
+
+                        continue
+
+                    # IMPORTANT:
+                    #
+                    # Do NOT check immediately.
+                    #
+                    # Some applications perform the JS redirect
+                    # after 5-6 seconds.
+                    final_url = wait_for_redirect(
+                        page,
+                        base_url,
+                        args.wait,
+                    )
+
+                    if is_evil_redirect(
+                        base_url,
+                        final_url,
+                    ):
+
+                        print()
+                        print(
+                            "       🔴 "
+                            "CONFIRMED CLIENT-SIDE REDIRECT!"
+                        )
+
+                        print(
+                            f"       Final URL: "
+                            f"{truncate_url(final_url)}"
+                        )
+
+                        finding_key = (
+                            base_url,
+                            final_url,
+                            tuple(parameter_group),
+                        )
+
+                        if finding_key not in seen:
+
+                            seen.add(
+                                finding_key
+                            )
+
+                            finding = {
+                                "original_url": base_url,
+                                "test_url": test_url,
+                                "final_url": final_url,
+                                "parameters": parameter_group,
+                            }
+
+                            findings.append(
+                                finding
+                            )
+
+                            send_discord(
+                                webhook,
+                                base_url,
+                                test_url,
+                                final_url,
+                                parameter_group,
+                            )
+
+                    else:
+
+                        print(
+                            f"       ✓ Final URL: "
+                            f"{truncate_url(final_url)}"
+                        )
+
+        finally:
+
+            browser.close()
+
+    # Save confirmed vulnerabilities.
+    with open(
+        args.output,
+        "w",
+        encoding="utf-8",
+    ) as output:
+
+        for finding in findings:
+
+            output.write(
+                f"Original URL: "
+                f"{finding['original_url']}\n"
+            )
+
+            output.write(
+                f"Test URL: "
+                f"{finding['test_url']}\n"
+            )
+
+            output.write(
+                f"Final URL: "
+                f"{finding['final_url']}\n"
+            )
+
+            output.write(
+                "Parameters: "
+                + ", ".join(
+                    finding["parameters"]
+                )
+                + "\n"
+            )
+
+            output.write(
+                f"Payload: {PAYLOAD}\n"
+            )
+
+            output.write(
+                "Type: Client-Side JS Redirect\n"
+            )
+
+            output.write(
+                "----------------------------------------\n"
+            )
+
+    print()
+    print(
+        "[+] Scan completed."
+    )
+
+    print(
+        f"[+] Confirmed findings: "
+        f"{len(findings)}"
+    )
+
+    print(
+        f"[+] Results saved to: "
+        f"{args.output}"
+    )
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
