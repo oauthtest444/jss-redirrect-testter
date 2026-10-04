@@ -1,5 +1,5 @@
 {
   "domain": "cb.dev",
-  "stage": "route-recon",
+  "stage": "redirect",
   "domain_index": 0
 }
