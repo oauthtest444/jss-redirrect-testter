@@ -1,5 +1,5 @@
 {
   "domain": "directory-v3-live.cb.dev",
-  "stage": "redirect",
+  "stage": "complete-domain",
   "domain_index": 0
 }
